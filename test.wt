@@ -96,13 +96,13 @@ fun factorial(n) {
 io.println(factorial(15))
 */
 import 'std.io'
-import 'std.gc'
-map := new Map()
-map.set('banana', 14)
-map.set('apple', 5)
-map.set('plum', 7)
-gc.invoke()
-map.set('plum', 7)
-io.println(map.to_string())
-map.delete('plum')
-io.println(map.to_string())
+fun factorial(n) {
+    f := 1
+    r := 1
+    while f <= n {
+        r *= f
+        f += 1
+    }
+    return r
+}
+factorial(15)

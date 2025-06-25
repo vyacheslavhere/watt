@@ -1,9 +1,9 @@
 // импорты
-use crate::vm::table::Table;
 use crate::vm::values::{FnOwner, Value};
 use crate::vm::vm::VM;
 use crate::vm::memory::memory;
 use std::collections::{HashSet};
+use crate::vm::stack::table::Table;
 
 // структура сборщика мусора
 #[derive(Debug)]
@@ -96,18 +96,6 @@ impl GC {
         for val in (*table).fields.values() {
             self.mark_value(*val);
         }
-        // маркинг замыкания
-        if !(*table).closure.is_null() {
-            self.mark_table((*table).closure);
-        }
-        // маркинг рут таблицы
-        if !(*table).root.is_null() {
-            self.mark_table((*table).root);
-        }
-        // маркинг parent таблицы
-        if !(*table).parent.is_null() {
-            self.mark_table((*table).parent);
-        }
     }
     // очистка
     fn sweep(&mut self) {
@@ -170,15 +158,21 @@ impl GC {
         }
     }
     // сборка мусора
-    pub unsafe fn collect_garbage(&mut self, vm: &mut VM, table: *mut Table) {
+    pub unsafe fn collect_garbage(&mut self, vm: &mut VM) {
         // лог
         self.log("gc :: triggered :: {:?}".to_string());
-        // марк
-        for val in vm.stack.clone() {
+        // mark
+        // > evaluations стэк
+        for val in vm.evaluation_stack.clone() {
             self.mark_value(val)
         };
+        // > units table
         self.mark_table(vm.units);
-        self.mark_table(table);
+        // > table stack
+        for frame in (*vm.table_stack).stack.clone() {
+            self.mark_table(frame.table);
+            self.mark_table(frame.closure);
+        }
         // sweep
         self.sweep();
         // ресет
@@ -198,8 +192,8 @@ impl Drop for GC {
         // лог
         self.log(format!("gc :: cleanup :: {:?}", self.objects.len()));
         // перебираем, и высвобождаем аллоцированые объекты
-        for value in &self.objects {
-            self.free_value(value.clone());
-        }
+        // for value in &self.objects {
+        //     self.free_value(value.clone());
+        // }
     }
 }

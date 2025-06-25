@@ -5,7 +5,7 @@ use crate::lexer::address::Address;
 use crate::vm::bytecode::Chunk;
 use crate::vm::flow::ControlFlow;
 use crate::vm::memory::memory;
-use crate::vm::table::Table;
+use crate::vm::stack::table::Table;
 use crate::vm::vm::VM;
 
 // символ
@@ -159,7 +159,7 @@ impl Drop for Function {
 pub struct Native {
     pub name: Symbol,
     pub params_amount: usize,
-    pub function: fn(&mut VM,Address,bool,*mut Table,Option<FnOwner>) -> Result<(), ControlFlow>,
+    pub function: fn(&mut VM,Address,bool,Option<FnOwner>) -> Result<(), ControlFlow>,
     pub owner: Option<FnOwner>,
 }
 impl Native {
@@ -167,7 +167,7 @@ impl Native {
     pub fn new(
         name: Symbol,
         params_amount: usize,
-        function: fn(&mut VM,Address,bool,*mut Table,Option<FnOwner>
+        function: fn(&mut VM,Address,bool,Option<FnOwner>
         ) -> Result<(), ControlFlow>) -> Native {
         // возвращаем
         Native {

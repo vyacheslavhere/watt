@@ -7,10 +7,11 @@ use crate::lexer::address::Address;
 use crate::vm::bytecode::{Chunk, Opcode, OpcodeValue};
 use crate::vm::flow::ControlFlow;
 use crate::vm::natives::natives;
-use crate::vm::table::Table;
 use crate::vm::values::{FnOwner, Function, Instance, Symbol, Trait, TraitFn, Type, Unit, Value};
 use crate::vm::memory::gc::GC;
 use crate::vm::memory::memory;
+use crate::vm::stack::table::Table;
+use crate::vm::stack::table_stack::{StackFrame, TableStack};
 
 // настройки
 #[derive(Debug)]
@@ -28,14 +29,14 @@ impl VmSettings {
 // вм
 #[derive(Debug)]
 pub struct VM {
-    pub globals: *mut Table,
     types: *mut Table,
     pub units: *mut Table,
     traits: *mut Table,
     pub natives: *mut Table,
     pub gc: *mut GC,
     settings: VmSettings,
-    pub stack: VecDeque<Value>,
+    pub evaluation_stack: VecDeque<Value>,
+    pub table_stack: *mut TableStack
 }
 // имплементация вм
 #[allow(non_upper_case_globals)]
@@ -45,13 +46,13 @@ impl VM {
     pub unsafe fn new(settings: VmSettings) -> VM {
         // вм
         let mut vm = VM {
-            globals: memory::alloc_value(Table::new()),
             types: memory::alloc_value(Table::new()),
             units: memory::alloc_value(Table::new()),
             traits: memory::alloc_value(Table::new()),
             natives: memory::alloc_value(Table::new()),
             gc: memory::alloc_value(GC::new(settings.gc_debug)),
-            stack: VecDeque::new(),
+            evaluation_stack: VecDeque::new(),
+            table_stack: memory::alloc_value(TableStack::new()),
             settings
         };
         // нативы
@@ -64,62 +65,60 @@ impl VM {
 
     // пуш
     pub unsafe fn push(&mut self, value: Value) {
-        self.stack.push_back(value);
+        self.evaluation_stack.push_back(value);
     }
 
     // поп
     pub fn pop(&mut self, address: &Address) -> Result<Value, ControlFlow> {
-        if self.stack.is_empty() {
+        if self.evaluation_stack.is_empty() {
             error!(Error::new(
                 address.clone(),
                 "stack underflow.".to_string(),
                 "check your code.".to_string()
             ));
         }
-        Ok(self.stack.pop_back().unwrap())
+        Ok(self.evaluation_stack.pop_back().unwrap())
     }
 
     // shallow очистка
     pub unsafe fn cleanup(&mut self) {
         // todo: add vm debug option
         // высвобождаем типы
-        (*self.types).free_fields();
+        (*self.types).free();
         memory::free_value(self.types);
         // высвобождаем трэйты
-        (*self.traits).free_fields();
+        (*self.traits).free();
         memory::free_value(self.traits);
         // высвобождаем нативные функции
-        (*self.natives).free_fields();
+        (*self.natives).free();
         memory::free_value(self.natives);
         // высвобождаем таблицу юнитов
         memory::free_value(self.units);
-        // высвобождаем таблицу глобальных переменные
-        memory::free_value(self.globals);
         // высвобождаем gc
         memory::free_value(self.gc);
     }
 
     // очистка мусора
-    pub unsafe fn gc_invoke(&mut self, table: *mut Table) {
-        (*self.gc).collect_garbage(self, table);
+    pub unsafe fn gc_invoke(&mut self) {
+        (*self.gc).collect_garbage(self);
     }
 
     // добавление в учет сборщика мусора
-    pub unsafe fn gc_register(&mut self, value: Value, table: *mut Table) {
+    pub unsafe fn gc_register(&mut self, value: Value) {
         // gil
         // добавляем объект
         (*self.gc).add_object(value);
         // проверяем порог gc
         if (*self.gc).objects_amount() > self.settings.gc_threshold {
             // вызываем gc
-            self.gc_invoke(table);
+            self.gc_invoke();
             // увеличиваем порог
             self.settings.gc_threshold *= 2;
         }
     }
 
     // пуш в стек
-    pub unsafe fn op_push(&mut self, value: OpcodeValue, table: *mut Table) -> Result<(), ControlFlow> {
+    pub unsafe fn op_push(&mut self, value: OpcodeValue) -> Result<(), ControlFlow> {
         // проверяем значение
         match value {
             OpcodeValue::Int(int) => { self.push(Value::Int(int)); }
@@ -131,7 +130,7 @@ impl VM {
                         string
                     )
                 );
-                self.gc_register(new_string, table);
+                self.gc_register(new_string);
                 self.push(new_string);
             }
             OpcodeValue::Raw(raw) => {
@@ -140,7 +139,7 @@ impl VM {
                     Value::Native(_) | Value::String(_) |
                     Value::Unit(_) | Value::List(_) => {
                         // добавляем в gc
-                        self.gc_register(raw, table);
+                        self.gc_register(raw);
                         // пушим
                         self.push(raw);
                     }
@@ -156,7 +155,7 @@ impl VM {
     }
     
     // бинарная операция
-    unsafe fn op_binary(&mut self, address: &Address, op: &str, table: *mut Table) -> Result<(), ControlFlow> {
+    unsafe fn op_binary(&mut self, address: &Address, op: &str) -> Result<(), ControlFlow> {
         // два операнда
         let operand_a = self.pop(&address)?;
         let operand_b = self.pop(&address)?;
@@ -184,8 +183,8 @@ impl VM {
                         let string = Value::String(
                             memory::alloc_value(format!("{}{:?}", *a, operand_b))
                         );
-                        self.gc_register(string, table);
                         self.push(string);
+                        self.gc_register(string);
                     }
                     _ => { error!(error); }
                 }
@@ -494,26 +493,27 @@ impl VM {
     }
 
     // иф
-    unsafe fn op_if(&mut self, addr: &Address, cond: &Chunk, body: &Chunk,
-                    elif: &Option<Box<Opcode>>, root: *mut Table) -> Result<(), ControlFlow> {
+    unsafe fn op_if(&mut self, addr: &Address, cond: &Chunk,
+                    body: &Chunk, elif: &Option<Box<Opcode>>) -> Result<(), ControlFlow> {
+        // стэк таблиц
+        let table_stack = self.table_stack;
         // таблица
-        let table = memory::alloc_value(Table::new());
-        (*table).set_root(root);
+        (*table_stack).push_frame(None);
         // высвобождение
         defer! {
-            // высвобождение таблицы
-            memory::free_value(table);
+            // удаляем таблицу
+            (*table_stack).pop_frame(addr);
         }
         // условие
-        self.run(cond, table)?;
+        self.run(cond)?;
         let bool = self.pop(&addr)?;
         // проверка
         if let Value::Bool(b) = bool {
             if b {
-                self.run(body, table)?
+                self.run(body)?
             } else {
                 if let Option::Some(else_if) = elif {
-                    self.run(&Chunk::of(*else_if.clone()), table)? // todo: chunk::of has high runtime cost!
+                    self.run(&Chunk::of(*else_if.clone()))? // todo: chunk::of has high runtime cost!
                 }
             }
         } else {
@@ -529,18 +529,19 @@ impl VM {
 
     // луп
     #[allow(unused_variables)]
-    unsafe fn op_loop(&mut self, addr: &Address, body: &Chunk, root: *mut Table) -> Result<(), ControlFlow> {
+    unsafe fn op_loop(&mut self, addr: &Address, body: &Chunk) -> Result<(), ControlFlow> {
+        // стэк таблиц
+        let table_stack = self.table_stack;
         // таблица
-        let table = memory::alloc_value(Table::new());
-        (*table).set_root(root);
+        (*table_stack).push_frame(None);
         // высвобождение
         defer! {
-            // высвобождение таблицы
-            memory::free_value(table);
+            // удаляем таблицу
+            (*table_stack).pop_frame(addr);
         }
         // проверка
         loop {
-            if let Err(e) = self.run(&body, table) {
+            if let Err(e) = self.run(&body) {
                 match e {
                     ControlFlow::Continue => {
                         continue;
@@ -559,8 +560,8 @@ impl VM {
     }
 
     // дефайн функции
-    unsafe fn op_define_fn(&mut self, addr: &Address, symbol: &Symbol, body: &Chunk,
-                        params: &Vec<String>, table: *mut Table) -> Result<(), ControlFlow> {
+    unsafe fn op_define_fn(&mut self, addr: &Address, symbol: &Symbol,
+                           body: &Chunk, params: &Vec<String>) -> Result<(), ControlFlow> {
         // создаём функцию
         let function = memory::alloc_value(
             Function::new(
@@ -571,16 +572,12 @@ impl VM {
         );
         // создаём значение функции и добавляем в gc
         let function_value = Value::Fn(function);
-        self.gc_register(function_value, table);
+        self.gc_register(function_value,);
         // дефайн функции
-        if let Err(e) = (*table).define(&addr, &symbol.name, function_value) {
-            error!(e);
-        }
+        (*self.table_stack).define(&addr, &symbol.name, function_value);
         // дефайн функции по full-name
         if symbol.full_name.is_some() {
-            if let Err(e) = (*table).define(&addr, symbol.full_name.as_ref().unwrap(), function_value) {
-                error!(e);
-            }
+            (*self.table_stack).define(&addr, symbol.full_name.as_ref().unwrap(), function_value);
         }
         // успех
         Ok(())
@@ -626,8 +623,8 @@ impl VM {
     }
 
     // дефайн юнита
-    unsafe fn op_define_unit(&mut self, addr: &Address, symbol: &Symbol,
-                             body: &Chunk, table: *mut Table) -> Result<(), ControlFlow> {
+    unsafe fn op_define_unit(&mut self, addr: &Address,
+                             symbol: &Symbol, body: &Chunk) -> Result<(), ControlFlow> {
         // создаём юнит
         let unit = memory::alloc_value(
             Unit::new(
@@ -636,17 +633,21 @@ impl VM {
             )
         );
         // добавляем в учет gc
-        self.gc_register(Value::Unit(unit), table);
-        // рут
-        (*(*unit).fields).set_root(self.globals);
+        self.gc_register(Value::Unit(unit));
+        // временно пушим таблицу
+        let mut unit_frame = StackFrame::new(None);
+        unit_frame.table = (*unit).fields;
+        (*self.table_stack).append_frame(unit_frame);
         // временный self
         (*(*unit).fields).fields.insert("self".to_string(), Value::Unit(unit));
         // исполняем тело
-        self.run(body, (*unit).fields)?;
+        self.run(body)?;
         // удаляем временный self
         (*(*unit).fields).fields.remove(&"self".to_string());
         // бинды
         self.bind_functions((*unit).fields, FnOwner::Unit(unit));
+        // удаляем таблицу из стека
+        (*self.table_stack).remove_frame();
         // дефайн юнита
         if let Err(e) = (*self.units).define(&addr, &symbol.name, Value::Unit(unit)) {
             error!(e);
@@ -662,8 +663,8 @@ impl VM {
     }
 
     // дефайн тейта
-    unsafe fn op_define_trait(&mut self, addr: &Address, symbol: &Symbol, functions: &Vec<TraitFn>)
-    -> Result<(), ControlFlow> {
+    unsafe fn op_define_trait(&mut self, addr: &Address,
+                              symbol: &Symbol, functions: &Vec<TraitFn>) -> Result<(), ControlFlow> {
         // создаём трейт
         let _trait = memory::alloc_value(
             Trait::new(
@@ -686,18 +687,16 @@ impl VM {
     }
 
     // дефайн
-    unsafe fn op_define(&mut self, addr: &Address, name: &str, has_previous: bool,
-                        value: &Chunk, table: *mut Table) -> Result<(), ControlFlow> {
+    unsafe fn op_define(&mut self, addr: &Address, name: &str,
+                        has_previous: bool, value: &Chunk) -> Result<(), ControlFlow> {
         // если нет предыдущего
         if !has_previous {
             // исполняем значение
-            self.run(value, table)?;
+            self.run(value)?;
             // получаем значение
             let operand = self.pop(&addr)?;
             // дефайним
-            if let Err(e) = (*table).define(&addr, &name, operand) {
-                error!(e);
-            }
+            (*self.table_stack).define(&addr, &name, operand);
         }
         // если есть
         else {
@@ -707,7 +706,7 @@ impl VM {
             match previous {
                 Value::Instance(instance) => {
                     // исполняем значение
-                    self.run(value, table)?;
+                    self.run(value)?;
                     // получаем значение
                     let operand = self.pop(&addr)?;
                     // дефайним
@@ -717,7 +716,7 @@ impl VM {
                 }
                 Value::Unit(unit) => {
                     // исполняем значение
-                    self.run(value, table)?;
+                    self.run(value)?;
                     // получаем значение
                     let operand = self.pop(&addr)?;
                     // дефайним
@@ -740,41 +739,39 @@ impl VM {
 
     // установка значения переменной
     unsafe fn op_set(&mut self, addr: &Address, name: &str, has_previous: bool,
-                        value: &Chunk, table: *mut Table) -> Result<(), ControlFlow> {
+                        value: &Chunk) -> Result<(), ControlFlow> {
         // если нет предыдущего
         if !has_previous {
             // исполняем значение
-            self.run(value, table)?;
+            self.run(value)?;
             // получаем значение
-            let operand = self.pop(&addr)?;
+            let operand = self.pop(addr)?;
             // дефайним
-            if let Err(e) = (*table).set(addr.clone(), name, operand) {
-                error!(e);
-            }
+            (*self.table_stack).set(addr, name, operand);
         }
         // если есть
         else {
             // получаем значение
-            let previous = self.pop(&addr)?;
+            let previous = self.pop(addr)?;
             // проверяем
             match previous {
                 Value::Instance(instance) => {
                     // исполняем значение
-                    self.run(value, table)?;
+                    self.run(value)?;
                     // получаем значение
                     let operand = self.pop(&addr)?;
                     // устанавливаем значение
-                    if let Err(e) = (*(*instance).fields).set_local(&addr, name, operand) {
+                    if let Err(e) = (*(*instance).fields).set(&addr, name, operand) {
                         error!(e);
                     }
                 }
                 Value::Unit(unit) => {
                     // исполняем значение
-                    self.run(value, table)?;
+                    self.run(value)?;
                     // получаем значение
                     let operand = self.pop(&addr)?;
                     // устанавливаем значение
-                    if let Err(e) = (*(*unit).fields).set_local(&addr, name, operand) {
+                    if let Err(e) = (*(*unit).fields).set(&addr, name, operand) {
                         error!(e);
                     }
                 }
@@ -792,15 +789,14 @@ impl VM {
     }
 
     // загрузка значения переменной
-    unsafe fn op_load(&mut self, addr: &Address, name: &str, has_previous: bool,
-                      should_push: bool, table: *mut Table) -> Result<(), ControlFlow> {
+    unsafe fn op_load(&mut self, addr: &Address, name: &str, has_previous: bool, should_push: bool) -> Result<(), ControlFlow> {
         // если нет предыдущего
         if !has_previous {
             // получаем значение
             let lookup_result;
-            if (*table).has(&name) {
-                lookup_result = (*table).lookup(&addr, &name);
-            } else if (*self.types).has(&name) {
+            if (*self.table_stack).exists(&name) {
+                lookup_result = (*self.table_stack).find(&addr, &name);
+            } else if (*self.types).exists(&name) {
                 lookup_result = (*self.types).find(&addr, &name);
             } else {
                 lookup_result = (*self.units).find(&addr, &name);
@@ -866,58 +862,30 @@ impl VM {
     // вызов функции
     #[allow(unused_parens)]
     pub unsafe fn call(&mut self, addr: &Address, name: &str,
-                              callable: Value, args: &Chunk,
-                              table: *mut Table, should_push: bool) -> Result<(), ControlFlow> {
+                       callable: Value, args: &Chunk,
+                       should_push: bool) -> Result<(), ControlFlow> {
 
         // подгрузка аргументов
-        unsafe fn pass_arguments(vm: &mut VM, addr: &Address, name: &str, params_amount: usize,
-                                 args: &Chunk, params: Vec<String>, table: *mut Table,
-                                 call_table: *mut Table) -> Result<(), ControlFlow> {
-            // фиксируем размер стека
-            let prev_size = vm.stack.len();
-            // загрузка аргументов
-            vm.run(args, table)?;
-            // фиксируем новый размер стека
-            let new_size = vm.stack.len();
-            // количество переданных аргументов
-            let passed_amount = new_size-prev_size;
-            // проверяем количество аргументов и параметров
-            // если совпало
-            if passed_amount == params_amount {
-                // проходимся по реверсированным параметрам
-                for param in params.iter().rev() {
-                    // получаем аргумент из стека
-                    let operand = vm.pop(&addr)?;
-                    // устанавливаем в таблице
-                    if let Err(e) = (*call_table).define(&addr, &param, operand) {
-                        error!(e);
-                    }
-                }
-                Ok(())
+        unsafe fn pass_arguments(vm: &mut VM, addr: &Address, params: Vec<String>) -> Result<(), ControlFlow> {
+            // проходимся по реверсированным параметрам
+            for param in params.iter().rev() {
+                // получаем аргумент из стека
+                let operand = vm.pop(&addr)?;
+                // устанавливаем в таблице
+                (*vm.table_stack).define(&addr, &param, operand);
             }
-            // если не совпало
-            else {
-                error!(Error::new(
-                    addr.clone(),
-                    format!(
-                        "invalid args amount: {} to call: {}. stack: {:?}",
-                        passed_amount, name, vm.stack
-                    ),
-                    format!("expected {} arguments.", params_amount)
-                ));
-                Ok(())
-            }
+            Ok(())
         }
 
         // только загрузка аргументов
-        unsafe fn load_arguments(vm: &mut VM, addr: &Address, name: &str, params_amount: usize,
-                                 args: &Chunk, table: *mut Table) -> Result<(), ControlFlow> {
+        unsafe fn load_arguments(vm: &mut VM, addr: &Address, name: &str,
+                                 params_amount: usize, args: &Chunk) -> Result<(), ControlFlow> {
             // фиксируем размер стека
-            let prev_size = vm.stack.len();
+            let prev_size = vm.evaluation_stack.len();
             // загрузка аргументов
-            vm.run(args, table)?;
+            vm.run(args)?;
             // фиксируем новый размер стека
-            let new_size = vm.stack.len();
+            let new_size = vm.evaluation_stack.len();
             // количество переданных аргументов
             let passed_amount = new_size-prev_size;
             // проверяем
@@ -928,7 +896,7 @@ impl VM {
                     addr.clone(),
                     format!(
                         "invalid args amount: {} to call: {}. stack: {:?}",
-                        passed_amount, name, vm.stack
+                        passed_amount, name, vm.evaluation_stack
                     ),
                     format!("expected {} arguments.", params_amount)
                 ));
@@ -938,45 +906,44 @@ impl VM {
 
         // проверка на функцию
         if let Value::Fn(function) = callable {
+            // загрузка аргументов
+            load_arguments(
+                self,
+                addr,
+                name,
+                (*function).params.len(),
+                args
+            )?;
+            // стэк таблиц
+            let table_stack = self.table_stack;
             // создаём таблицу под вызов.
-            let call_table = memory::alloc_value(Table::new());
-            // parent таблица
-            (*call_table).parent = table;
-            // замыкание
-            (*call_table).closure = (*function).closure;
-            // высвобождение
+            (*table_stack).push_frame(Some(
+                (*function).closure
+            ));
+            // удаление таблицы
             defer! {
-                // высвобождение таблицы
-                memory::free_value(call_table);
+                // удаление таблицы
+                (*table_stack).pop_frame(addr)
             }
-            // рут и self
+            // сопоставляем аргументы с параметрами
+            pass_arguments(
+                self,
+                addr,
+                (*function).params.clone()
+            )?;
+            // установка self
             if (*function).owner.is_some() {
                 match (*function).owner.clone().unwrap() {
                     FnOwner::Unit(unit) => {
-                        (*call_table).set_root((*unit).fields);
-                        if let Err(e) = (*call_table).define(
-                            &addr, "self", Value::Unit(unit)
-                        ) {
-                            error!(e);
-                        }
+                        (*table_stack).define(&addr, "self", Value::Unit(unit));
                     },
                     FnOwner::Instance(instance) => {
-                        (*call_table).set_root((*instance).fields);
-                        if let Err(e) = (*call_table).define(
-                            &addr, "self", Value::Instance(instance)
-                        ) {
-                            error!(e);
-                        }
+                        (*table_stack).define(&addr, "self", Value::Instance(instance));
                     }
                 }
-            } else {
-                (*call_table).set_root(self.globals)
             }
-            // загрузка аргументов
-            pass_arguments(self, addr, name, (*function).params.len(), args,
-                           (*function).params.clone(), table, call_table)?;
             // вызов
-            match self.run(&*(*function).body, call_table) {
+            match self.run(&*(*function).body) {
                 // если поймали control flow
                 Err(e) => {
                     return match e {
@@ -1003,43 +970,31 @@ impl VM {
         }
         // проверка на нативную функцию
         else if let Value::Native(function) = callable {
+            // загрузка аргументов
+            load_arguments(self, &addr, &name, (*function).params_amount, args)?;
+            // стэк таблиц
+            let table_stack = self.table_stack;
             // создаём таблицу под вызов.
-            let call_table = memory::alloc_value(Table::new());
-            // parent таблица
-            (*call_table).parent = table;
-            // высвобождение
+            (*table_stack).push_frame(None);
+            // удаление таблицы
             defer! {
-                // высвобождение таблицы
-                memory::free_value(call_table);
+                // удаление таблицы
+                (*table_stack).pop_frame(addr)
             }
-            // рут и self
-            if (*function).owner.clone().is_some() {
+            // self
+            if (*function).owner.is_some() {
                 match (*function).owner.clone().unwrap() {
                     FnOwner::Unit(unit) => {
-                        (*call_table).set_root((*unit).fields);
-                        if let Err(e) = (*call_table).define(
-                            &addr, "self", Value::Unit(unit)
-                        ) {
-                            error!(e);
-                        }
+                        (*table_stack).define(&addr, "self", Value::Unit(unit));
                     },
                     FnOwner::Instance(instance) => {
-                        (*call_table).set_root((*instance).fields);
-                        if let Err(e) = (*call_table).define(
-                            &addr, "self", Value::Instance(instance)
-                        ) {
-                            error!(e);
-                        }
+                        (*table_stack).define(&addr, "self", Value::Instance(instance));
                     }
                 }
-            } else {
-                (*call_table).set_root(self.globals)
             }
-            // загрузка аргументов
-            load_arguments(self, &addr, &name, (*function).params_amount, args, table)?;
             // вызов
             let native = (*function).function;
-            native(self, addr.clone(), should_push, call_table, (*function).owner.clone())?;
+            native(self, addr.clone(), should_push, (*function).owner.clone())?;
             // успех
             Ok(())
         }
@@ -1055,11 +1010,11 @@ impl VM {
 
     // загрузка значения переменной
     pub unsafe fn op_call(&mut self, addr: &Address, name: &str, has_previous: bool,
-                                 should_push: bool, args: &Chunk, table: *mut Table) -> Result<(), ControlFlow> {
+                                 should_push: bool, args: &Chunk) -> Result<(), ControlFlow> {
         // если нет предыдущего
         if !has_previous {
             // получаем значение
-            let lookup_result = (*table).lookup(&addr, &name);
+            let lookup_result = (*self.table_stack).find(&addr, &name);
             // проверяем на ошибку
             if let Err(e) = lookup_result {
                 // ошибка
@@ -1067,7 +1022,7 @@ impl VM {
             }
             else if let Ok(value) = lookup_result {
                 // вызываем
-                self.call(addr, &name, value, &args, table, should_push)?;
+                self.call(addr, &name, value, &args, should_push)?;
             }
         }
         // если есть
@@ -1086,7 +1041,7 @@ impl VM {
                     }
                     else if let Ok(value) = lookup_result {
                         // вызываем
-                        self.call(addr, &name, value, args, table, should_push)?;
+                        self.call(addr, &name, value, args, should_push)?;
                     }
                 }
                 Value::Unit(unit) => {
@@ -1099,7 +1054,7 @@ impl VM {
                     }
                     else if let Ok(value) = lookup_result {
                         // вызываем
-                        self.call(addr, &name, value, args, table, should_push)?;
+                        self.call(addr, &name, value, args, should_push)?;
                     }
                 }
                 _ => {
@@ -1157,7 +1112,7 @@ impl VM {
         // получение имплементации
         unsafe fn get_impl(table: *mut Table, addr: &Address, impl_name: String) -> Option<*mut Function> {
             // трейт
-            let fn_result = (*table).lookup(&addr, &impl_name);
+            let fn_result = (*table).find(&addr, &impl_name);
             // проверяем результат
             if let Err(e) = fn_result {
                 error!(e);
@@ -1259,18 +1214,17 @@ impl VM {
 
     // созедание экземпляра типа
     unsafe fn op_instance(&mut self, addr: &Address, name: &str,
-                          args: &Chunk, should_push: bool, table: *mut Table) -> Result<(), ControlFlow> {
+                          args: &Chunk, should_push: bool) -> Result<(), ControlFlow> {
 
         // подгрузка конструктора
         unsafe fn pass_constructor(vm: &mut VM, addr: &Address, name: &str, params_amount: usize,
-                                 args: &Chunk, params: Vec<String>, table: *mut Table,
-                                   fields_table: *mut Table) -> Result<(), ControlFlow> {
+                                 args: &Chunk, params: Vec<String>, fields_table: *mut Table) -> Result<(), ControlFlow> {
             // фиксируем размер стека
-            let prev_size = vm.stack.len();
+            let prev_size = vm.evaluation_stack.len();
             // загрузка аргументов
-            vm.run(args, table)?;
+            vm.run(args)?;
             // фиксируем новый размер стека
-            let new_size = vm.stack.len();
+            let new_size = vm.evaluation_stack.len();
             // количество переданных аргументов
             let passed_amount = new_size-prev_size;
             // проверяем
@@ -1295,7 +1249,7 @@ impl VM {
             }
         }
         // ищем тип
-        let lookup_result = (*self.types).lookup(&addr, &name);
+        let lookup_result = (*self.table_stack).find(&addr, &name);
         // проверяем, найден ли
         if let Ok(value) = lookup_result {
             // проверяем тип ли
@@ -1307,7 +1261,7 @@ impl VM {
                         memory::alloc_value(Table::new()),
                     ));
                     // добавляем в учет gc
-                    self.gc_register(Value::Instance(instance), table);
+                    self.gc_register(Value::Instance(instance));
                     // конструктор
                     pass_constructor(
                         self,
@@ -1316,21 +1270,24 @@ impl VM {
                         (*t).constructor.len(),
                         args,
                         (*t).constructor.clone(),
-                        table,
                         (*instance).fields
                     )?;
-                    // рут
-                    (*(*instance).fields).set_root(self.globals);
+                    // временно пушим таблицу
+                    let mut instance_frame = StackFrame::new(None);
+                    instance_frame.table = (*instance).fields;
+                    (*self.table_stack).append_frame(instance_frame);
                     // временный self
                     (*(*instance).fields).fields.insert("self".to_string(), Value::Instance(instance));
                     // исполняем тело
-                    self.run(&*(*t).body, (*instance).fields)?;
+                    self.run(&*(*t).body)?;
                     // удаляем временный self
                     (*(*instance).fields).fields.remove(&"self".to_string());
                     // проверка трейтов
                     self.check_traits(addr, instance);
                     // бинды
                     self.bind_functions((*instance).fields, FnOwner::Instance(instance));
+                    // удаляем таблицу из стека
+                    (*self.table_stack).remove_frame();
                     // значение экземпляра
                     let instance_value = Value::Instance(
                         instance
@@ -1341,7 +1298,13 @@ impl VM {
                         // пушим инстанс
                         self.push(instance_value);
                         // вызываем
-                        self.op_call(addr, &init_fn, true, false, &Chunk::new(vec![]), table)?
+                        self.op_call(
+                            addr,
+                            &init_fn,
+                            true,
+                            false,
+                            &Chunk::new(vec![])
+                        )?
                     }
                     // пушим
                     if should_push {
@@ -1372,15 +1335,18 @@ impl VM {
     }
 
     // создание замыкания
-    unsafe fn op_make_closure(&mut self, addr: &Address, name: &str, table: *mut Table) -> Result<(), ControlFlow> {
+    unsafe fn op_make_closure(&mut self, addr: &Address, name: &str) -> Result<(), ControlFlow> {
         // ищем
-        let lookup_result = (*table).lookup(&addr, name);
+        let lookup_result = (*self.table_stack).find(&addr, name);
         // проверяем, нашло ли
         if let Ok(value) = lookup_result {
             // проверяем, функция ли
             if let Value::Fn(function) = value {
                 // устанавливаем замыкание
-                let table_clone = memory::alloc_value((*table).clone());
+                let current_frame = (*self.table_stack).top_frame(addr); // todo: root closure
+                let table_clone = memory::alloc_value(
+                    (*current_frame.table).clone()
+                );
                 (*function).closure = table_clone;
                 // успех
                 Ok(())
@@ -1404,9 +1370,9 @@ impl VM {
     }
 
     // возврат значения из функции
-    unsafe fn op_return(&mut self, addr: &Address, value: &Chunk, table: *mut Table) -> Result<(), ControlFlow> {
+    unsafe fn op_return(&mut self, addr: &Address, value: &Chunk) -> Result<(), ControlFlow> {
         // выполняем
-        self.run(value, table)?;
+        self.run(value)?;
         let value = self.pop(&addr)?;
         // возвращаем
         Err(ControlFlow::Return(value))
@@ -1429,9 +1395,9 @@ impl VM {
     }
 
     // "пробрасывание" ошибок
-    unsafe fn op_error_propagation(&mut self, addr: &Address, value: &Chunk, table: *mut Table) -> Result<(), ControlFlow> {
+    unsafe fn op_error_propagation(&mut self, addr: &Address, value: &Chunk) -> Result<(), ControlFlow> {
         // выполняем
-        self.run(value, table)?;
+        self.run(value)?;
         // значение
         let value = self.pop(&addr)?;
         // вызов is_ok
@@ -1465,7 +1431,6 @@ impl VM {
                 vm.call(
                     &addr, "is_ok", callable,
                     &Chunk::new(vec![]),
-                    memory::alloc_value(Table::new()),
                     true
                 )?;
                 // получаем значение
@@ -1522,7 +1487,6 @@ impl VM {
                     vm.call(
                         &addr, "unwrap", callable,
                         &Chunk::new(vec![]),
-                        memory::alloc_value(Table::new()),
                         true
                     )?;
                     // успех
@@ -1575,16 +1539,15 @@ impl VM {
     }
 
     // проверка имплементации трейта
-    unsafe fn op_impls(&mut self, addr: &Address, value: &Chunk,
-                       trait_name: &str, table: *mut Table) -> Result<(), ControlFlow> {
+    unsafe fn op_impls(&mut self, addr: &Address, value: &Chunk, trait_name: &str) -> Result<(), ControlFlow> {
         // выполняем
-        self.run(value, table)?;
+        self.run(value)?;
         // значение
         let value = self.pop(&addr)?;
         // проверка, экземпляр ли класс значение
         if let Value::Instance(instance) = value {
             // ищем трейт
-            let lookup_result = (*self.traits).lookup(&addr, &trait_name);
+            let lookup_result = (*self.traits).find(&addr, &trait_name);
             // если нашли
             if let Ok(trait_value) = lookup_result {
                 // проверяем, трейт ли
@@ -1635,23 +1598,23 @@ impl VM {
 
     // удаление локальной переменной
     #[allow(unused_variables)]
-    unsafe fn op_delete_local(&self, addr: &Address, name: &String, table: *mut Table) {
-        (*table).fields.remove(name);
+    unsafe fn op_delete_local(&self, addr: &Address, name: &String) {
+        (*self.table_stack).delete(name);
     }
 
     // запуск байткода
     #[allow(unused_variables)]
-    pub unsafe fn run(&mut self, chunk: &Chunk, table: *mut Table) -> Result<(), ControlFlow> {
+    pub unsafe fn run(&mut self, chunk: &Chunk) -> Result<(), ControlFlow> {
         for op in chunk.opcodes() {
             match op {
                 Opcode::Push { addr, value } => {
-                    self.op_push(value.clone(), table)?;
+                    self.op_push(value.clone())?;
                 }
                 Opcode::Pop { addr } => {
                     self.pop(&addr)?;
                 }
                 Opcode::Bin { addr, op } => {
-                    self.op_binary(addr, &op, table)?;
+                    self.op_binary(addr, &op)?;
                 }
                 Opcode::Neg { addr } => {
                     self.op_negate(addr)?;
@@ -1666,61 +1629,61 @@ impl VM {
                     self.op_logical(addr, &op)?
                 }
                 Opcode::If { addr, cond, body, elif } => {
-                    self.op_if(addr, cond, body, elif, table)?;
+                    self.op_if(addr, cond, body, elif)?;
                 }
                 Opcode::Loop { addr, body } => {
-                    self.op_loop(addr, body, table)?;
+                    self.op_loop(addr, body)?;
                 }
                 Opcode::DefineFn { addr, name, full_name, body, params } => {
-                    self.op_define_fn(addr, &Symbol::new_option(name.clone(), full_name.clone()), body, params, table)?;
+                    self.op_define_fn(addr, &Symbol::new_option(name.clone(), full_name.clone()), body, params)?;
                 }
                 Opcode::DefineType { addr, name, full_name, body, constructor, impls } => {
                     self.op_define_type(addr, &Symbol::new_option(name.clone(), full_name.clone()), body, constructor, impls)?
                 }
                 Opcode::DefineUnit { addr, name, full_name, body } => {
-                    self.op_define_unit(addr, &Symbol::new_option(name.clone(), full_name.clone()), body, table)?
+                    self.op_define_unit(addr, &Symbol::new_option(name.clone(), full_name.clone()), body)?
                 }
                 Opcode::DefineTrait { addr, name, full_name, functions } => {
                     self.op_define_trait(addr, &Symbol::new_option(name.clone(), full_name.clone()), functions)?
                 }
                 Opcode::Define { addr, name, value, has_previous} => {
-                    self.op_define(addr, name, *has_previous, value, table)?;
+                    self.op_define(addr, name, *has_previous, value)?;
                 }
                 Opcode::Set { addr, name, value, has_previous } => {
-                    self.op_set(addr, name, *has_previous, value, table)?;
+                    self.op_set(addr, name, *has_previous, value)?;
                 }
                 Opcode::Load { addr, name, has_previous, should_push } => {
-                    self.op_load(addr, name, *has_previous, *should_push, table)?;
+                    self.op_load(addr, name, *has_previous, *should_push)?;
                 }
                 Opcode::Call { addr, name, has_previous, should_push, args } => {
-                    self.op_call(addr, name, *has_previous, *should_push, args, table)?
+                    self.op_call(addr, name, *has_previous, *should_push, args)?
                 }
                 Opcode::Duplicate { addr } => {
                     self.op_duplicate(addr)?;
                 }
                 Opcode::Instance { addr, name, args, should_push } => {
-                    self.op_instance(addr, name, args, *should_push, table)?;
+                    self.op_instance(addr, name, args, *should_push)?;
                 }
                 Opcode::EndLoop { addr, current_iteration } => {
                     self.op_endloop(addr, *current_iteration)?;
                 }
                 Opcode::Closure { addr, name } => {
-                    self.op_make_closure(addr, name, table)?;
+                    self.op_make_closure(addr, name)?;
                 }
                 Opcode::Ret { addr, value } => {
-                    self.op_return(addr, value, table)?;
+                    self.op_return(addr, value)?;
                 }
                 Opcode::Native { addr, fn_name } => {
                     self.op_native(addr, fn_name)?;
                 }
                 Opcode::ErrorPropagation { addr, value } => {
-                    self.op_error_propagation(addr, value, table)?;
+                    self.op_error_propagation(addr, value)?;
                 }
                 Opcode::Impls { addr, value, trait_name } => {
-                    self.op_impls(addr, value, trait_name, table)?;
+                    self.op_impls(addr, value, trait_name)?;
                 }
                 Opcode::DeleteLocal { addr, name } => {
-                    self.op_delete_local(addr, name, table)
+                    self.op_delete_local(addr, name);
                 }
             }
         }

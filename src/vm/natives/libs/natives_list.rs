@@ -2,7 +2,6 @@
 use crate::errors::errors::Error;
 use crate::lexer::address::Address;
 use crate::vm::natives::natives;
-use crate::vm::table::Table;
 use crate::vm::values::{FnOwner, Value};
 use crate::vm::vm::VM;
 use crate::error;
@@ -18,7 +17,7 @@ pub unsafe fn provide(built_in_address: Address, vm: &mut VM) -> Result<(), Erro
         built_in_address.clone(),
         0,
         "list@make".to_string(),
-        |vm: &mut VM, addr: Address, should_push: bool, table: *mut Table, owner: Option<FnOwner>| {
+        |vm: &mut VM, addr: Address, should_push: bool, owner: Option<FnOwner>| {
             // если надо пушить
             if should_push {
                 // список
@@ -28,7 +27,7 @@ pub unsafe fn provide(built_in_address: Address, vm: &mut VM) -> Result<(), Erro
                     Value::List(
                         list
                     )
-                ), table)?;
+                ))?;
             }
             // успех
             Ok(())
@@ -39,7 +38,7 @@ pub unsafe fn provide(built_in_address: Address, vm: &mut VM) -> Result<(), Erro
         built_in_address.clone(),
         2,
         "list@add".to_string(),
-        |vm: &mut VM, addr: Address, should_push: bool, table: *mut Table, owner: Option<FnOwner>| {
+        |vm: &mut VM, addr: Address, should_push: bool, owner: Option<FnOwner>| {
             // значение
             let value = vm.pop(&addr).unwrap();
             // список
@@ -68,7 +67,7 @@ pub unsafe fn provide(built_in_address: Address, vm: &mut VM) -> Result<(), Erro
         built_in_address.clone(),
         3,
         "list@set".to_string(),
-        |vm: &mut VM, addr: Address, should_push: bool, table: *mut Table, owner: Option<FnOwner>| {
+        |vm: &mut VM, addr: Address, should_push: bool, owner: Option<FnOwner>| {
             // значение
             let value = vm.pop(&addr).unwrap();
             // индекс
@@ -111,7 +110,7 @@ pub unsafe fn provide(built_in_address: Address, vm: &mut VM) -> Result<(), Erro
         built_in_address.clone(),
         2,
         "list@get".to_string(),
-        |vm: &mut VM, addr: Address, should_push: bool, table: *mut Table, owner: Option<FnOwner>| {
+        |vm: &mut VM, addr: Address, should_push: bool, owner: Option<FnOwner>| {
             // индекс
             let index_value = vm.pop(&addr).unwrap();
             // список
@@ -161,7 +160,7 @@ pub unsafe fn provide(built_in_address: Address, vm: &mut VM) -> Result<(), Erro
         built_in_address.clone(),
         2,
         "list@delete_at".to_string(),
-        |vm: &mut VM, addr: Address, should_push: bool, table: *mut Table, owner: Option<FnOwner>| {
+        |vm: &mut VM, addr: Address, should_push: bool, owner: Option<FnOwner>| {
             // индекс
             let index_value = vm.pop(&addr).unwrap();
             // список
@@ -211,7 +210,7 @@ pub unsafe fn provide(built_in_address: Address, vm: &mut VM) -> Result<(), Erro
         built_in_address.clone(),
         2,
         "list@delete".to_string(),
-        |vm: &mut VM, addr: Address, should_push: bool, table: *mut Table, owner: Option<FnOwner>| {
+        |vm: &mut VM, addr: Address, should_push: bool, owner: Option<FnOwner>| {
             // индекс
             let value = vm.pop(&addr).unwrap();
             // список
@@ -241,7 +240,7 @@ pub unsafe fn provide(built_in_address: Address, vm: &mut VM) -> Result<(), Erro
         built_in_address.clone(),
         2,
         "list@index_of".to_string(),
-        |vm: &mut VM, addr: Address, should_push: bool, table: *mut Table, owner: Option<FnOwner>| {
+        |vm: &mut VM, addr: Address, should_push: bool, owner: Option<FnOwner>| {
             // индекс
             let value = vm.pop(&addr).unwrap();
             // список
@@ -272,7 +271,7 @@ pub unsafe fn provide(built_in_address: Address, vm: &mut VM) -> Result<(), Erro
         built_in_address.clone(),
         1,
         "list@length".to_string(),
-        |vm: &mut VM, addr: Address, should_push: bool, table: *mut Table, owner: Option<FnOwner>| {
+        |vm: &mut VM, addr: Address, should_push: bool, owner: Option<FnOwner>| {
             // список
             let list_value = vm.pop(&addr).unwrap();
             // проверяем
@@ -302,7 +301,7 @@ pub unsafe fn provide(built_in_address: Address, vm: &mut VM) -> Result<(), Erro
         built_in_address.clone(),
         1,
         "list@to_string".to_string(),
-        |vm: &mut VM, addr: Address, should_push: bool, table: *mut Table, owner: Option<FnOwner>| {
+        |vm: &mut VM, addr: Address, should_push: bool, owner: Option<FnOwner>| {
             // список
             let list_value = vm.pop(&addr).unwrap();
             // проверяем
@@ -311,7 +310,7 @@ pub unsafe fn provide(built_in_address: Address, vm: &mut VM) -> Result<(), Erro
                 if should_push {
                     vm.op_push(OpcodeValue::String(
                         format!("{:?}", *list)
-                    ), table)?;
+                    ))?;
                 }
             }
             else {

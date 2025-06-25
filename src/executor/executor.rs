@@ -217,14 +217,18 @@ unsafe fn run_chunk(chunk: Chunk, gc_threshold: usize, gc_debug: bool, bench: bo
         gc_threshold,
         gc_debug,
     ));
+    // глоабльный фрейм
+    (*vm.table_stack).push_frame(None);
     // запуск
-    if let Err(e) = vm.run(&chunk, vm.globals) {
+    if let Err(e) = vm.run(&chunk) {
         error!(Error::new(
             Address::unknown(),
             format!("control flow leak: {:?}", e),
             "report this error to the developer.".to_string()
         ));
     }
+    // удаляем фрейм
+    (*vm.table_stack).free();
     // конечное время
     if bench {
         let duration = start.elapsed().as_nanos();

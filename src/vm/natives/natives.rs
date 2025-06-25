@@ -5,7 +5,6 @@ use crate::vm::flow::ControlFlow;
 use crate::vm::memory::memory;
 use crate::vm::vm::{VM};
 use crate::vm::natives::libs::*;
-use crate::vm::table::Table;
 use crate::vm::values::{FnOwner, Native, Symbol, Value};
 use crate::error;
 
@@ -28,7 +27,7 @@ pub unsafe fn provide(
     addr: Address,
     params_amount: usize,
     name: String,
-    native: fn(&mut VM,Address,bool,*mut Table,Option<FnOwner>) -> Result<(), ControlFlow>) {
+    native: fn(&mut VM,Address,bool,Option<FnOwner>) -> Result<(), ControlFlow>) {
     // дефайн
     if let Err(e) = (*vm.natives).define(
         &addr,
