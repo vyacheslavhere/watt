@@ -1,6 +1,5 @@
 // импорты
 use crate::vm::stack::table::Table;
-use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use crate::error;
 use crate::errors::errors::Error;
@@ -34,7 +33,7 @@ impl Debug for StackFrame {
 
 // стэк таблиц
 pub struct TableStack {
-    pub stack: VecDeque<StackFrame>,
+    pub stack: Vec<StackFrame>,
 }
 
 // имплемнтация
@@ -42,19 +41,19 @@ impl TableStack {
     // новый стэк
     pub fn new() -> Self {
         TableStack {
-            stack: VecDeque::new()
+            stack: Vec::new()
         }
     }
 
     // удаление переменной
     pub unsafe fn delete(&self, name: &str) {
-        (*self.stack.back().unwrap().table).fields.remove(name);
+        (*self.stack.last().unwrap().table).fields.remove(name);
     }
 
     // существует ли переменная
     pub unsafe fn exists(&self, name: &str) -> bool {
         // если найдено
-        for frame in self.stack.iter().rev() {
+        for frame in &self.stack {
             if (*frame.table).exists(name) {
                 return true;
             }
@@ -69,7 +68,7 @@ impl TableStack {
     // поиск переменной
     pub unsafe fn find(&self, addr: &Address, name: &str) -> Result<Value, Error> {
         // если найдено
-        for frame in self.stack.iter().rev() {
+        for frame in &self.stack {
             if (*frame.table).exists(name) {
                 return (*frame.table).find(addr, name);
             }
@@ -87,7 +86,7 @@ impl TableStack {
 
     // дефайн переменной
     pub unsafe fn define(&mut self, addr: &Address, name: &str, value: Value) {
-        for frame in self.stack.iter().rev() {
+        for frame in &self.stack {
             match (*frame.table).define(addr, name, value) {
                 Ok(_) => return,
                 Err(e) => error!(e),
@@ -97,7 +96,7 @@ impl TableStack {
 
     // установка переменной
     pub unsafe fn set(&mut self, addr: &Address, name: &str, value: Value) {
-        for frame in self.stack.iter().rev() {
+        for frame in &self.stack {
             if (*frame.table).exists(name) {
                 match (*frame.table).set(addr, name, value) {
                     Ok(_) => return,
@@ -114,19 +113,19 @@ impl TableStack {
 
     // пуш фрейма
     pub unsafe fn push_frame(&mut self, closure: Option<*mut Table>) {
-        self.stack.push_back(StackFrame::new(
+        self.stack.push(StackFrame::new(
             closure
         ));
     }
 
     // добавление фрейм
     pub fn append_frame(&mut self, stack_frame: StackFrame) {
-        self.stack.push_back(stack_frame);
+        self.stack.push(stack_frame);
     }
 
     // удаление фрейма
     pub fn remove_frame(&mut self) {
-        self.stack.pop_back();
+        self.stack.pop();
     }
 
     // поп фрейм
@@ -141,7 +140,7 @@ impl TableStack {
         }
         // фрэйм
         let frame
-            = self.stack.pop_back().unwrap();
+            = self.stack.pop().unwrap();
         // очистка таблицы
         memory::free_value(frame.table);
         // очистка замыкания
@@ -161,7 +160,7 @@ impl TableStack {
             ))
         }
         // возвращам
-        self.stack.back().unwrap().clone()
+        self.stack.last().unwrap().clone()
     }
 
     // очистка
