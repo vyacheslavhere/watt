@@ -117,10 +117,10 @@ pub fn lex(file_name: &str, code: &str, debug: bool, bench: bool) -> Option<Vec<
     // начальное время
     let start = std::time::Instant::now();
     // сканнинг токенов
-    let tokens = Lexer::new(
-        code,
-        file_name
-    ).lex();
+    let mut lexer = Lexer::new(code, file_name);
+    lexer.lex();
+
+    let tokens = lexer.tokens;
     // конечное время
     let duration = start.elapsed().as_nanos();
     if bench { println!("benchmark 'lexer', elapsed {}", duration as f64 / 1_000_000f64); }

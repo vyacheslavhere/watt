@@ -9,44 +9,18 @@ use crate::vm::memory::memory;
 #[derive(Clone)]
 pub struct Table {
     pub fields: HashMap<String,Value>,
-    pub root: *mut Table, // root таблица, например глобальных переменных
-    pub parent: *mut Table, // parent таблица, таблица вызова до этой.
-    pub closure: *mut Table
 }
 // имплементация
 impl Table {
     pub fn new() -> Table {
         Table {
             fields: HashMap::new(),
-            root: std::ptr::null_mut(),
-            parent: std::ptr::null_mut(),
-            closure: std::ptr::null_mut(),
         }
     }
 
     pub unsafe fn exists(&self, name: &str) -> bool {
         if self.fields.contains_key(name) {
             true
-        } else if !self.closure.is_null() && (*self.closure).exists(name) {
-            true
-        } else {
-            false
-        }
-    }
-
-    pub unsafe fn find(&self, address: &Address, name: &str) -> Result<Value, Error> {
-        if self.exists(name) {
-            if self.fields.contains_key(name) {
-                Ok(self.fields[name].clone())
-            } else {
-                Ok((*self.closure).find(address, name)?)
-            }
-        } else {
-            Err(Error::new(
-                address.clone(),
-                format!("{name} is not found."),
-                "check variable existence.".to_string()
-            ))
         }
     }
 
