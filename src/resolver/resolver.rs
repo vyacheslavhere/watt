@@ -26,6 +26,7 @@ impl<'import_key, 'import_path> ImportsResolver<'import_key, 'import_path> {
                 ("std.convert", "./libs/std/std_convert.wt"),
                 ("std.typeof", "./libs/std/std_typeof.wt"),
                 ("std.time", "./libs/std/std_time.wt"),
+                ("std.fs", "./libs/std/std_fs.wt"),
             ]),
             builtins: vec!["./libs/base.wt".to_string()],
         }

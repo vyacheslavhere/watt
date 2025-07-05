@@ -1,0 +1,22 @@
+import 'std.errors'
+
+type File(raw_handle) {
+    fun read_to_string() {
+        return fs.__internal_read_to_string(self.raw_handle)
+    }
+}
+
+unit fs {
+    native __internal_open -> 'fs@open'
+    native __internal_read_to_string -> 'fs@read_to_string'
+
+    fun open(filename) {
+        file_hdl := __internal_open(filename)
+
+        if file_hdl == null {
+            return null
+        }
+
+        return new File(file_hdl)
+    }
+}

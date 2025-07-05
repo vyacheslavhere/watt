@@ -30,7 +30,7 @@ impl Error {
     }
 
     // вывод
-    pub fn panic(&self) {
+    pub fn panic(&self) -> ! {
         let filename = self.addr.file.as_ref().map_or("-", |v| v);
         let textline = self.addr.line_text.as_ref().map_or("-", |v| v);
 
