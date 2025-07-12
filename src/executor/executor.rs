@@ -92,6 +92,22 @@ pub fn crash(reason: String) -> ! {
 /// or file can not be read.
 ///
 pub fn read_file(addr: Option<Address>, path: &PathBuf) -> String {
+    // If path already exist, pass it
+    let path = if path.exists() {
+        path
+    } else {
+        // If not, so we take the directory path of our program that imports the file
+        let mut rpath = addr
+            .as_ref()
+            .and_then(|x| x.file.as_ref()).unwrap()
+            .parent().map(|x| x.to_path_buf()).unwrap();
+
+        // And add library name to it.
+        rpath.push(path);
+
+        &rpath.clone()
+    };
+
     if path.exists() {
         if let Ok(result) = fs::read_to_string(path) {
             result
@@ -103,12 +119,7 @@ pub fn read_file(addr: Option<Address>, path: &PathBuf) -> String {
                         "check file existence"
                     ));
             } else {
-                crash(
-                    format!(
-                        "file not found: {:?}",
-                        path
-                    )
-                );
+                crash(format!("file not found: {:?}", path));
             }
         }
     }
@@ -120,12 +131,7 @@ pub fn read_file(addr: Option<Address>, path: &PathBuf) -> String {
                     "check file existence"
                 ));
         } else {
-            crash(
-                format!(
-                    "file not found: {:?}",
-                    path
-                )
-            );
+            crash(format!("file not found: {:?}", path));
         }
     }
 }
